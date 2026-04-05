@@ -1,244 +1,437 @@
-TADA_T2
-==============================
+# TADA_T2 GPU 加速版
 
-# About TADA_T2
+> 基于 [TADA_T2](https://github.com/ryanemenecker/TADA_T2) 的 GPU 加速修改版
 
-TADA_T2 is a Tensorflow2 compatible version of the TADA transcriptional activation domain (TAD) predictor. TADA_T2 was developed with additional user-facing functionality to make TADA more accessible to the scientific community. With TADA_T2, you can input protein sequences or .fasta files and get back TAD scores, which are a measure of the ability of a protein sequence to activate transcription. See the [original publication](https://www.nature.com/articles/s41586-024-07707-3) for more details.
-  
-Credit to Lisa Van den Broeck for creating the original implementation of TADA. The original implementation can be found [here](https://github.com/LisaVdB/TADA).
+---
 
-## What does my TAD score mean?
-TAD scores range between 0 and 1 where lower values are predicted less likely to be TADs and higher values are predicted more likely to be TADs. Note that **the values are predictions and should be treated as such**. Nothing can substitute for experimental validation; however, the TADA scores can be used as a guide to help generate new hypotheses or plan new experiments. 
+## 目录
 
-### Is there a threshold value above which something should be considered likely to be a TAD?
-Given that TAD scores are continuous from 0 to 1, in general a higher score means a greater probability that your sequence functions as a TAD. However, in the original publication, the authors used a threshold such **that scores above 0.5** would be classified as TADs. This is a good starting point, but *it is important to remember that this is an arbitrary threshold and that the TADA scores should be used as a guide and not as a definitive answer*.
+- [项目简介](#项目简介)
+- [与原版差异](#与原版差异)
+- [系统要求](#系统要求)
+- [安装](#安装)
+  - [一键安装](#一键安装)
+  - [手动安装](#手动安装)
+- [使用方法](#使用方法)
+  - [基本用法](#基本用法)
+  - [查找表管理](#查找表管理)
+  - [命令行参数](#命令行参数)
+- [输出格式](#输出格式)
+- [文件结构](#文件结构)
+- [性能对比](#性能对比)
+- [常见问题](#常见问题)
+- [许可证](#许可证)
+
+---
+
+## 项目简介
+
+TADA_T2 是一个用于预测**转录激活域 (Transcriptional Activation Domain, TAD)** 的深度学习工具，基于 TensorFlow 2 的卷积-注意力-双向 LSTM 模型。输入蛋白质序列，输出每个序列的 TAD 预测分数（0-1，越高越可能是 TAD）。
+
+本项目是 TADA_T2 的 **GPU 加速修改版**，在原始仓库基础上：
+
+- 将所有可在GPU上进行的操作全部重写，显著提高推理速度
 
 
-## How were the transcriptional activation domains originally identified?
-To simplify things a bit, the original activation domains were identified using a high-throughput assay in *Saccharomyces cerevisiae* that assessed the ability of tens of thousands of different 40 amino acid fragments to drive transcription of a reporter. For more information on the actual assay, please see the [publication](https://www.nature.com/articles/s41586-024-07707-3).
+### 工作原理
 
-## How does TADA_T2 work..?
-TADA_T2 takes in 40 amino acid long sequences and calculates a bunch of features from that sequence such as charge, hydrophobicity, etc. [see the create_features() function](https://github.com/ryanemenecker/TADA_T2/blob/main/TADA_T2/backend/features.py). These features are then fed into a ML model that uses a network originally trained tens of thousands of 40 amino acid fragments that were the experimentally tested for their capacity to drive transcriptional activation. This is ultimately used to predict whether the input sequence is or is not likely to be a transcriptional activation domain.
-
-## What if my sequence is not 40 amino acids?
-
-TADA_T2 can make predictions of other length sequences (sort of).
-
-### Sequences longer than 40 amino acids:
-For sequences longer than 40 amino acids, TADA_T2 uses a 'sliding window' approach. Basically, TADA can 'scan over' your sequence to identify potential transcriptional activation domains. Note that **this is equivalent to breaking up your sequence into 'chunks' of 40 amino acids and making individual predictions on each chunk**. Thus, it is important to remember that predictions will only take in information from windows of 40 amino acids.
-
-### Sequences shorter than 40 amino acids:
-For sequences shorter than 40 amino acids, TADA_T2 will pad the sequence with 'X' amino acids to make the sequence 40 amino acids long. You can choose to pad the sequence evenly or on the N- or C-terminus. Further, you can pad the sequence with just G and S or a random selection of amino acids. **This is NOT ideal** and we recommend that you do not use TADA_T2 to predict TAD scores for sequences shorter than 40 amino acids. However, this functionality is available for users if you set ``safe_mode=False``. Because the predictor was not made for this, the predictions may not be accurate. Thus, by default we restrict the availablity of this feature. 
-
-## How can I cite TADA or TADA_T2?
-Please cite the [original publication](https://www.nature.com/articles/s41586-024-07707-3). If you use TADA_T2, please mention in your methods that you used TADA_T2 to generate your predictions and link to this repository so your readers know exactly how you got your results and so that they can use TADA_T2 if they would like to.
-
-### Citation:
-[Morffy, N., Van den Broeck, L., Miller, C. et al. Identification of plant transcriptional activation domains. Nature 632, 166–173 (2024)](https://doi.org/10.1038/s41586-024-07707-3)
-
-## Using TADA in Google Colab
-Basic functionality of TADA_T2 is also available in [Google Colab](https://colab.research.google.com/drive/1g4tkklihI-dIZV5BEHpPgpqtvofw1BFV?usp=sharing). This let's you generate TADA scores from sequences or from .fasta files without having to locally intall TADA_T2!
-
-# Installation
-
-To install from PyPI, run:
-```bash
-pip install TADA-T2
+```
+输入 FASTA 序列
+    │
+    ▼
+┌─────────────────────┐
+│  1. 解析 FASTA       │  提取序列名称与氨基酸序列
+│  2. 序列清洗         │  剔除 *, X, U 等非标准氨基酸
+│  3. 滑动窗口切分     │  步长 1，窗口 40aa（>40aa 序列）
+│  4. 特征计算 (GPU)   │  每窗口 42 维特征向量
+│  5. 特征缩放 (GPU)   │  StandardScaler + MinMaxScaler
+│  6. 模型推理 (GPU)   │  Conv1D → Attention → BiLSTM → Softmax
+│  7. 取最高分窗口     │  每条序列输出最佳 TAD 分数
+└─────────────────────┘
+    │
+    ▼
+输出 TSV（序列名、长度、最高分、最佳片段、位置）
 ```
 
-You can also install the current development version from
+### 42 维特征构成
+
+| 索引 | 特征 | 来源 | 级别 |
+|------|------|------|------|
+| 0 | kappa | NumPy 矢量化计算 | 序列级 |
+| 1 | omega | NumPy 矢量化计算 | 序列级 |
+| 2-9 | 理化性质 ×8 | 查找表（hydropathy, WW_hydropathy, ncpr, disorder_prom, fcr, charge, frac_neg, frac_pos） | 窗口级 |
+| 10-20 | 氨基酸类别 ×11 | one-hot 计数（aliphatics, aromatics, branching, charged, ...） | 窗口级 |
+| 21 | 二级结构 | alphaPredict 查找表 | 窗口级 |
+| 22-41 | 20 种氨基酸计数 | one-hot 计数（训练集顺序） | 窗口级 |
+
+---
+
+
+## 系统要求
+
+| 项目 | 最低要求 | 推荐 |
+|------|---------|------|
+| Python | ≥ 3.8 | 3.10+ |
+| TensorFlow | ≥ 2.10 | 2.15+（GPU 版） |
+| GPU 显存 | 4 GB | 16 GB+ |
+| 系统内存 | 8 GB | 32 GB+ |
+| 磁盘空间 | 2 GB | 5 GB+（含查找表） |
+
+**依赖包：**
+- `tensorflow` ≥ 2.10（模型推理 + GPU 特征计算）
+- `numpy`（矢量化计算）
+- `alphaPredict`（二级结构预测，生成查找表时需要）
+- `protfasta`（FASTA 解析辅助）
+- `tqdm`（进度条，可选）
+- `localcider`（仅生成 cider 查找表时需要，运行预测不需要）
+
+---
+
+## 安装
+
+### 一键安装
+
 ```bash
-pip install git+https://git@github.com/ryanemenecker/TADA_T2
+# 1. 解压安装包
+unzip TADA_T2_GPU.zip
+cd TADA_T2_GPU
+
+# 2. 运行安装脚本
+chmod +x setup.sh
+./setup.sh
 ```
 
-To clone the GitHub repository and gain the ability to modify a local copy of the code, run
+安装脚本自动完成以下步骤：
+
+1. 克隆原始 [TADA_T2](https://github.com/ryanemenecker/TADA_T2) 仓库
+2. 安装 Python 依赖（tensorflow, numpy, alphaPredict, protfasta, tqdm）
+3. `pip install -e .` 安装 TADA_T2 包
+4. 用修改后的 `features.py`、`model.py`、`predictor.py` 覆盖安装包中的原文件
+5. 安装完成 ✓
+
+### 手动安装
+
+如果自动安装遇到问题，可以手动执行：
+
 ```bash
-git clone https://github.com/ryanemenecker/TADA_T2.git
+# 1. 克隆原始仓库
+git clone --depth 1 https://github.com/ryanemenecker/TADA_T2.git
 cd TADA_T2
+
+# 2. 安装依赖
+pip install tensorflow numpy alphaPredict protfasta tqdm
+
+# 3. 安装 TADA_T2 包
 pip install -e .
+
+# 4. 替换修改后的文件
+#    找到安装路径：
+python3 -c "import TADA_T2; import os; print(os.path.join(os.path.dirname(TADA_T2.__file__), 'backend'))"
+#    将 src/TADA_T2/backend/ 下的 features.py、model.py、predictor.py 复制到上述路径
+
+# 5. 复制 predict_tad.py 到工作目录
+cp /path/to/TADA_T2_GPU/src/predict_tad.py /your/work/dir/
 ```
 
-# Usage
+---
 
-This documentation covers the functions for predicting TAD scores using the TADA model. The available functions are `predict` and `predict_from_fasta`.
- 
-First import the functions. 
+## 使用方法
+
+### 基本用法
+
+```bash
+cd /your/work/dir
+python3 predict_tad.py sequences.fasta -o results.tsv
+```
+
+首次运行时，如果 `alpha_5mer_lookup.npy` 和 `cider_5mer_lookup.npy` 不存在，脚本会**自动生成**（分别约 2-3 分钟和 10 分钟）。后续运行直接加载缓存，秒级启动。
+
+### 查找表管理
+
+predict_tad.py 按以下优先级查找两个查找表文件：
+
+| 优先级 | 查找方式 | 示例 |
+|--------|---------|------|
+| 1 | CLI 参数 | `--alpha_lookup ./alpha.npy` |
+| 2 | 环境变量 | `export TADA_ALPHA_LOOKUP=/path/to/alpha.npy` |
+| 3 | 包数据目录 | `TADA_T2/data/alpha_5mer_lookup.npy` |
+| 4 | 同目录 | 与 `features.py` 同级 |
+| 5 | 当前工作目录 | `./alpha_5mer_lookup.npy` |
+| 6 | 自动生成 | 都找不到就自动重新生成 |
+
+**指定已有文件：**
+
+```bash
+python3 predict_tad.py seq.fa \
+  --alpha_lookup /data/alpha_5mer_lookup.npy \
+  --cider_lookup /data/cider_5mer_lookup.npy
+```
+
+**仅生成查找表（不预测）：**
+
+```bash
+# 生成 alphaPredict 查找表（约 2-3 分钟，~13 MB）
+python3 predict_tad.py --gen_alpha
+
+# 生成 localCider 查找表（约 10 分钟，~100 MB，需要 localcider）
+python3 predict_tad.py --gen_cider
+```
+
+**通过环境变量指定（适合批量脚本）：**
+
+```bash
+export TADA_ALPHA_LOOKUP=/shared/alpha_5mer_lookup.npy
+export TADA_CIDER_LOOKUP=/shared/cider_5mer_lookup.npy
+python3 predict_tad.py sequences.fasta -o results.tsv
+```
+
+### 命令行参数
+
+```
+positional arguments:
+  fasta                 输入 FASTA 文件路径
+
+optional arguments:
+  -h, --help            显示帮助信息
+  -o, --output          输出 TSV 文件路径（不指定则打印到终端）
+  --batch_size          GPU 每批处理的序列窗口数（默认 10000）
+                        显存不足时减小，大显存可增大到 20000-30000
+  --overlap             >40aa 序列的滑动窗口重叠数（默认 39，即步长 1）
+                        增大步长可加速但降低分辨率
+  --alpha_lookup        指定 alphaPredict 5-mer 查找表路径
+  --cider_lookup        指定 localCider 5-mer 查找表路径
+  --gen_alpha           仅生成 alphaPredict 查找表并退出
+  --gen_cider           仅生成 localCider 查找表并退出
+```
+
+---
+
+## 输出格式
+
+输出为 TSV（Tab 分隔）格式，包含以下列：
+
+| 列名 | 类型 | 说明 |
+|------|------|------|
+| 序列名称 | string | FASTA 文件中的序列标识符 |
+| 序列长度 | int | 清洗后的序列氨基酸数 |
+| TAD最高分 | float | 滑动窗口中最高的 TAD 预测分数（0-1） |
+| 最佳40aa片段 | string | 得分最高的 40 氨基酸窗口序列 |
+| 起始位置 | int | 最佳窗口在原序列中的起始位置（1-indexed） |
+| 终止位置 | int | 最佳窗口在原序列中的终止位置（含） |
+
+**示例输出：**
+
+```
+序列名称	序列长度	TAD最高分	最佳40aa片段	起始位置	终止位置
+Seq001	256	0.892341	DEDEDEKRKRKRDEDEDEKRKRKRDEDEDEKRKRKRDEDE	45	84
+Seq002	40	0.123456	MFQILRKKKRVKLESLIMNRKSFAQSIENLFALSLLVKDG	1	40
+Seq003	35	0.000000	XXXX...	1	35
+```
+
+**分数解读：**
+- **≥ 0.5**：预测为 TAD（转录激活域）
+- **< 0.5**：预测为非 TAD
+- **= 0.0**：序列长度 < 40aa，无法预测
+
+**终端汇总输出：**
+
+```
+📊 汇总
+  总序列数:     698
+  TAD (≥0.5):   234 (33.5%)
+  非TAD (<0.5): 464 (66.5%)
+  分数范围:     0.0012 ~ 0.9876
+  平均分数:     0.2345
+  中位数分数:   0.1234
+  GPU 总耗时:   12.3s
+  吞吐量:       57 seqs/s (19,180 windows/s)
+```
+
+---
+
+## 文件结构
+
+```
+TADA_T2_GPU/
+│
+├── README.md                           # 本文档
+├── setup.sh                            # 一键安装脚本
+│
+└── src/
+    │
+    ├── predict_tad.py                  # 主预测脚本（独立运行）
+    │   ├── FASTA 解析 + 序列清洗
+    │   ├── 查找表自动检测/生成
+    │   ├── 滑动窗口切分
+    │   ├── kappa/omega 矢量化计算
+    │   ├── GPU 批量推理
+    │   └── TSV 结果输出
+    │
+    ├── generate_cider_lookup.py        # localCider 5-mer 查找表生成器
+    │   └── 需要 localcider 包，生成约 10 分钟
+    │
+    └── TADA_T2/
+        └── backend/
+            ├── features.py             # GPU 特征计算模块（替换原版）
+            │   ├── _encode_sequences_to_tensor()   # 序列 → 整数张量
+            │   ├── _compute_all_features_gpu()     # GPU 特征计算
+            │   ├── _compute_kappa_omega_cpu()      # NumPy 矢量化 kappa/omega
+            │   ├── scale_features_predict()        # GPU 特征缩放
+            │   └── 查找表自动加载（支持环境变量路径）
+            │
+            ├── model.py                # CNN-Attention-BiLSTM 模型定义（替换原版）
+            │   ├── Attention           # 自定义注意力层（TF2 兼容 + get_config 序列化）
+            │   │   ├── build()         # 初始化权重矩阵 W + 偏置 b
+            │   │   ├── call()          # tanh → softmax → 加权求和
+            │   │   └── get_config()    # 支持模型保存/加载
+            │   └── TadaModel           # 模型构建器
+            │       └── create_model()  # Input → Conv1D → Dropout → Conv1D →
+            │                            #  Dropout → Attention → BiLSTM → BiLSTM → Dense(softmax)
+            │
+            └── predictor.py            # GPU 加速推理器（替换原版）
+                ├── predict_tada()      # 全链路 GPU 推理入口
+                │   ├── create_features()   # 特征计算（GPU Tensor）
+                │   ├── scale_features()    # 特征缩放（GPU Tensor）
+                │   ├── model.predict()     # 模型推理（GPU Tensor）
+                │   └── 返回结果时才拷回 CPU
+                ├── _model_cache        # 全局模型缓存，避免重复加载
+                └── get_model_path()    # 获取预训练权重路径
+```
+
+安装后（通过 setup.sh）：
+
+```
+<python_env>/lib/python3.x/site-packages/TADA_T2/
+├── __init__.py
+├── TADA.py                             # 原版 API（predict, predict_from_fasta）
+├── backend/
+│   ├── features.py                     # ← 已替换为 GPU 版
+│   ├── model.py                        # ← 已替换为 TF2 兼容版
+│   ├── predictor.py                    # ← 已替换为全链路 GPU 版
+│   └── utils.py                        # 滑动窗口、padding 工具
+└── data/
+    ├── tada.14-0.02.hdf5               # 预训练模型权重（1.7 MB）
+    ├── scaler_metric.npy               # StandardScaler + MinMaxScaler 参数
+    ├── alpha_5mer_lookup.npy           # alphaPredict 查找表（首次运行自动生成）
+    └── cider_5mer_lookup.npy           # localCider 查找表（可选）
+```
+
+
+## 修改文件详情
+
+### features.py — GPU 特征计算模块
+
+**修改要点：**
+
+- 移除 localCider 强依赖，kappa/omega 改用 NumPy `searchsorted` 矢量化计算（快 50-100x）
+- 特征计算全流程使用 TF Tensor，数据保持在 GPU 上
+- 查找表加载支持环境变量路径（`TADA_ALPHA_LOOKUP`、`TADA_CIDER_LOOKUP`）
+- 5-mer 编码使用显式 slice + base-20 索引替代 conv1d
+- scaler 参数读取列号
+- 序列自动清洗，剔除非标准氨基酸
+
+### model.py — CNN-Attention-BiLSTM 模型定义
+
+**修改要点：**
+
+- `Attention` 自定义层更新为 TF2 兼容写法，添加 `get_config()` 方法支持模型序列化/保存/加载
+- 使用显式 `layers.Input(shape=...)` 层替代旧版隐式 input_shape，消除 TF2 弃用警告
+- `Attention` 权重初始化改用 `glorot_uniform`，提升训练稳定性
+- 模型架构：`Input(36,42) → Conv1D(100,2,gelu) → Dropout(0.3) → Conv1D(100,2,gelu) → Dropout(0.3) → Attention → BiLSTM(100) → BiLSTM(100) → Dense(2,softmax)`
+
+### predictor.py — 全链路 GPU 推理器
+
+**修改要点：**
+
+- 数据流完全保持在 GPU：`sequences → create_features (GPU) → scale_features (GPU) → model.predict (GPU)`，仅最终结果拷回 CPU
+- 引入全局模型缓存 `_model_cache`，避免每次调用重复加载模型权重
+- 使用 `importlib.resources.files` 获取预训练权重路径，兼容现代 Python 包管理
+- 支持 `return_both_values` 参数，可获取 softmax 两个输出值（TAD 分数 + 非 TAD 分数）
+
+---
+
+## 性能对比
+
+### kappa/omega 计算
+
+| 方法 | 698 条序列 | 速度提升 |
+|------|-----------|---------|
+| localCider（原版） | ~60-120 秒 | 1× |
+| NumPy `searchsorted`（本版） | ~1-2 秒 | **50-100×** |
+
+### 端到端推理（698 条序列，236K 窗口）
+
+| 阶段 | 耗时 |
+|------|------|
+| FASTA 解析 + 序列清洗 | < 1 秒 |
+| 滑动窗口切分 | < 1 秒 |
+| kappa/omega 预计算 | ~1 秒 |
+| GPU 批量推理 | ~10-15 秒 |
+| **总计** | **~15 秒** |
+
+吞吐量：约 50-60 条序列/秒，约 15,000-20,000 窗口/秒。
+
+在RTX PRO6000（96G 显存）上为植物蛋白质组的每条序列（共约60000条序列）预测TAD_Max，共耗时约1小时
+
+---
+
+## 常见问题
+
+### Q: 首次运行很慢？
+
+首次运行需要生成 `alpha_5mer_lookup.npy`（约 2-3 分钟）。生成后缓存在磁盘，后续运行秒级启动。
+
+### Q: 没有 GPU 能用吗？
+
+可以。TensorFlow 会自动回退到 CPU。速度会慢约 10-50 倍，但仍可正常运行。
+
+### Q: cider_5mer_lookup.npy 是什么？必须有吗？
+
+cider 查找表存储了所有 3,200,000 个 5-mer 的 8 个理化性质（疏水性、电荷等），用于窗口级特征计算。**预测时必须存在**。如果缺失，脚本会尝试自动生成（需要安装 localcider：`pip install localcider`，约 10 分钟）。
+
+### Q: 序列中有非标准氨基酸怎么办？
+
+脚本会自动剔除以下字符：`*` `X` `U` `B` `Z` `J` `O`，仅保留 20 种标准氨基酸（ACDEFGHIKLMNPQRSTVWY）。清洗后如果序列长度 < 40aa，该序列的 TAD 分数会输出 0.0。
+
+### Q: batch_size 怎么选？
+
+- **4GB 显存**：`--batch_size 2000`
+- **8GB 显存**：`--batch_size 5000`
+- **16GB 显存**：`--batch_size 10000`（默认）
+- **24GB+ 显存**：`--batch_size 20000-30000`
+
+### Q: 输出结果和原版一致吗？
+
+特征计算逻辑与原版 localCider 版本等价（使用预计算的 5-mer 查找表，数值精度 < 1e-6）。kappa/omega 使用相同公式的 NumPy 实现，理论上结果一致。
+
+### Q: 如何用 Python API 调用？
+
+安装后可以直接 import：
 
 ```python
 from TADA_T2.TADA import predict, predict_from_fasta
-```
-  
-Now you should be ready to go!
 
-## Important note about predictions:
-TADA was originally made to make predictions of 40 amino acid sequences. Thus, if your sequence is over 40 amino acids, TADA_T2 will break it up into 40 amino acid 'chunks' and return a list of predictions where the first element in the list is the sequence for a given chunk and the second element is the TADA score for that chunk. If your sequence is less than 40 amino acids, TADA_T2 will by default raise an exception. You can disable this by setting ``safe_mode=False`` in the predict function. However, we do not recommend this as the predictions may not be accurate. 
+# 预测单条序列
+result = predict("MFQILRKKKRVKLESLIMNRKSFAQSIENLFALSLLVKDGFQILRKKK")
 
-
-## predict
-  
-The ``predict`` function lets you predicts TAD scores for a sequence or a list of sequences.
-  
-```python
-predict(sequences)
+# 从 FASTA 文件预测
+result = predict_from_fasta("sequences.fasta")
 ```
 
-**Parameters**:
-* ``sequences`` (str or list): A string of a single sequence or a list of sequences to predict TADA scores for.
-* ``overlap_length`` int: The amount of overlap to have between sequences when breaking up sequences longer than 40 amino acids. Default is 39.
-* ``safe_mode`` (bool): If True, the function will raise an exception if the sequence is less than 40 amino acids. If False, the function will pad the sequence with 'X' amino acids to make the sequence 40 amino acids long. Default is True.
-* ``pad`` (str): What amino acids to pad your sequence with if it is less than 40 amino acids. Options are 'random' or 'GS'. The 'random' option will pad your sequence with randomly chosen amino acids and the 'GS' option will pad your sequence with randomly selected G or S. Default is 'GS'.
-* ``approach`` (str): How to pad the sequence if it is less than 40 amino acids. Options are 'even', 'N', or 'C'. The 'even' option will pad the sequence evenly on both sides, the 'N' option will pad the sequence on the N-terminus, and the 'C' option will pad the sequence on the C-terminus. Default is 'even'.
-* ``verbose`` (bool): If True, the function will print out a warning when sequences are not all 40 amino acids. Default is True.
+---
 
+## 许可证
 
-  
-**Returns**:
+原始 TADA_T2 采用 [MIT License](https://github.com/ryanemenecker/TADA_T2/blob/main/LICENSE)。
 
-The ``predict`` function returns a dictionary where the key is the sequence and the value is a list of lists where the first element in each sublist is the sequence used for the prediction and the second element is the score the specific sequence used for that prediction. The reason for this formatting is to keep it consistent with predictions of sequences that are not 40 amino acids in length.
+本修改版遵循相同的 MIT 许可证。
 
-### Examples
+---
 
-#### Predicting TAD scores for a single sequence:
-```python
-single_sequence = "EFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTD"
-tada_score = predict(single_sequence)
-print(tada_score)
-{'EFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTD': [['EFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTD', 0.64596486]]}
-```
+## 致谢
 
-#### Predicting TAD scores for multiple sequences:
-```python
-sequence_list = ["QFNENSNIMQQQPLQGSFNPLLEYDFANHGGQWLSDYIDL", "EFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTD"]
-tada_scores = predict(sequence_list)
-print(tada_scores)
-{'QFNENSNIMQQQPLQGSFNPLLEYDFANHGGQWLSDYIDL': [['QFNENSNIMQQQPLQGSFNPLLEYDFANHGGQWLSDYIDL', 0.6370786]], 'EFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTD': [['EFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTD', 0.6459648]]}
-```
-
-#### Predicting TAD scores for sequences longer than 40 amino acids:
-
-```python
-sequence = "EFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTDEFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTD"
-predictions = predict(sequence)
-Warning: Not all sequences are 40 amino acids long.
-Sequences shorter than 40 amino acids will be padded with a random selection of G and S evenly on the N and C terminus.
-Sequences longer than 40 amino acids will be windowed to make sequences 40 amino acids in length with 39 overlapping amino acids.
-print(predictions)
-{'EFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTDEFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTD': [['EFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTD', 0.64596474], ['FSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTDE', 0.6526803], ['SPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTDEF', 0.6716454], ['PENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTDEFS', 0.68872523], ['ENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTDEFSP', 0.6902989], ['NSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTDEFSPE', 0.6911438], ['SSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTDEFSPEN', 0.6911325], ['SSSSWSSQESFLWEESFLHQSFDQSFLLSSPTDEFSPENS', 0.6796427], ['SSSWSSQESFLWEESFLHQSFDQSFLLSSPTDEFSPENSS', 0.6682477], ['SSWSSQESFLWEESFLHQSFDQSFLLSSPTDEFSPENSSS', 0.67283314], ['SWSSQESFLWEESFLHQSFDQSFLLSSPTDEFSPENSSSS', 0.6614274], ['WSSQESFLWEESFLHQSFDQSFLLSSPTDEFSPENSSSSS', 0.64761055], ['SSQESFLWEESFLHQSFDQSFLLSSPTDEFSPENSSSSSW', 0.65187407], ['SQESFLWEESFLHQSFDQSFLLSSPTDEFSPENSSSSSWS', 0.6707002], ['QESFLWEESFLHQSFDQSFLLSSPTDEFSPENSSSSSWSS', 0.6585511], ['ESFLWEESFLHQSFDQSFLLSSPTDEFSPENSSSSSWSSQ', 0.64087546], ['SFLWEESFLHQSFDQSFLLSSPTDEFSPENSSSSSWSSQE', 0.6390648], ['FLWEESFLHQSFDQSFLLSSPTDEFSPENSSSSSWSSQES', 0.5987145], ['LWEESFLHQSFDQSFLLSSPTDEFSPENSSSSSWSSQESF', 0.58188677], ['WEESFLHQSFDQSFLLSSPTDEFSPENSSSSSWSSQESFL', 0.6071577], ['EESFLHQSFDQSFLLSSPTDEFSPENSSSSSWSSQESFLW', 0.6604433], ['ESFLHQSFDQSFLLSSPTDEFSPENSSSSSWSSQESFLWE', 0.6806072], ['SFLHQSFDQSFLLSSPTDEFSPENSSSSSWSSQESFLWEE', 0.69611514], ['FLHQSFDQSFLLSSPTDEFSPENSSSSSWSSQESFLWEES', 0.6919587], ['LHQSFDQSFLLSSPTDEFSPENSSSSSWSSQESFLWEESF', 0.6967068], ['HQSFDQSFLLSSPTDEFSPENSSSSSWSSQESFLWEESFL', 0.6949902], ['QSFDQSFLLSSPTDEFSPENSSSSSWSSQESFLWEESFLH', 0.6817843], ['SFDQSFLLSSPTDEFSPENSSSSSWSSQESFLWEESFLHQ', 0.6620016], ['FDQSFLLSSPTDEFSPENSSSSSWSSQESFLWEESFLHQS', 0.64122045], ['DQSFLLSSPTDEFSPENSSSSSWSSQESFLWEESFLHQSF', 0.62519723], ['QSFLLSSPTDEFSPENSSSSSWSSQESFLWEESFLHQSFD', 0.6331634], ['SFLLSSPTDEFSPENSSSSSWSSQESFLWEESFLHQSFDQ', 0.64535403], ['FLLSSPTDEFSPENSSSSSWSSQESFLWEESFLHQSFDQS', 0.6383764], ['LLSSPTDEFSPENSSSSSWSSQESFLWEESFLHQSFDQSF', 0.6442358], ['LSSPTDEFSPENSSSSSWSSQESFLWEESFLHQSFDQSFL', 0.6482361], ['SSPTDEFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLL', 0.6431058], ['SPTDEFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLS', 0.638392], ['PTDEFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSS', 0.64072704], ['TDEFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSP', 0.6440916], ['DEFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPT', 0.648353], ['EFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTD', 0.6459648]]}
-```
-  
-**Note**: You can turn off the warning message by setting ``verbose=False``.
-  
-**Note**: You can change the amount of overlap between the windows by setting the ``overlap_length`` parameter. The default is 39, which means that each sequence windows will overlap by 39 amino acids. This means that the windows will be 40 amino acids in length with 39 amino acids overlapping between each window. If you set the overlap length to 0, the windows will not overlap. If you set the overlap length to 20, the windows will overlap by 20 amino acids. Decreasing window value may result in you missing predictions for some subsequences if your sequence is not evenly divisible into 40 amino acid windows with that overlap amount. 
-
-**Example with overlap_length**:
-```python
-sequence = "EFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTDEFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTD"
-predictions = predict(sequence, overlap_length=20, verbose=False)
-print(predictions)
-{'EFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTDEFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTD': [['EFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTD', 0.6459648], ['EESFLHQSFDQSFLLSSPTDEFSPENSSSSSWSSQESFLW', 0.66044325], ['EFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTD', 0.6459648]]}
-```
-
-#### Predicting TAD scores for sequences shorter than 40 amino acids:
-
-```python
-sequence = "EFSPENSSSSSWSSQESFLW"
-prediction = predict(sequence, safe_mode=False, verbose=False)
-print(prediction)
-{'EFSPENSSSSSWSSQESFLW': [['GSSGSGSSSGEFSPENSSSSSWSSQESFLWGSGSSSGSSG', 0.42451635]]}
-```
-  
-**Note**: The sequence in the list is not the same as the input sequence. This is because the input sequence had to be padded to be 40 amino acids. In this case, the default padding was used. This evenly adds random G and S to each side of the sequence until it is 40 amino acids long. You can also change how the padding works. See below:
-
-* ``pad`` (str): What amino acids to pad your sequence with if it is less than 40 amino acids. **Options are 'random' or 'GS'**. The 'random' option will pad your sequence with randomly chosen amino acids and the 'GS' option will pad your sequence with randomly selected G or S. Default is 'GS'.
-* ``approach`` (str): How to pad the sequence if it is less than 40 amino acids. **Options are 'even', 'N', or 'C'**. The 'even' option will pad the sequence evenly on both sides, the 'N' option will pad the sequence on the N-terminus, and the 'C' option will pad the sequence on the C-terminus. Default is 'even'.
-
-
-**Example with altered padding**:
-```python
-sequence = "EFSPENSSSSSWSSQ"
-predictions = predict(sequence, safe_mode=False, pad='random', approach='N', verbose=False)
-print(predictions)
-{'EFSPENSSSSSWSSQ': [['KYPTSTWQCRRAKTLNPPREEVIFAEFSPENSSSSSWSSQ', 0.23243405]]}
-```
-
-## predict_from_fasta
-  
-The ``predict_from_fasta`` function lets you get TAD scores for sequences in a .fasta file.
-  
-
-```python
-predict_from_fasta(path_to_fasta)
-```
-  
-**Parameters**:
-* ``path_to_fasta`` (str): The path to your .fasta file.
-* ``overlap_length`` int: The amount of overlap to have between sequences when breaking up sequences longer than 40 amino acids. Default is 39.
-* ``safe_mode`` (bool): If True, the function will raise an exception if the sequence is less than 40 amino acids. If False, the function will pad the sequence with 'X' amino acids to make the sequence 40 amino acids long. Default is True.
-* ``pad`` (str): What amino acids to pad your sequence with if it is less than 40 amino acids. Options are 'random' or 'GS'. The 'random' option will pad your sequence with randomly chosen amino acids and the 'GS' option will pad your sequence with randomly selected G or S. Default is 'GS'.
-* ``approach`` (str): How to pad the sequence if it is less than 40 amino acids. Options are 'even', 'N', or 'C'. The 'even' option will pad the sequence evenly on both sides, the 'N' option will pad the sequence on the N-terminus, and the 'C' option will pad the sequence on the C-terminus. Default is 'even'.
-* ``verbose`` (bool): If True, the function will print out a warning when sequences are not all 40 amino acids. Default is True.
-
-  
-**Returns**:
-
-The ``predict_from_fasta`` function returns a dictionary where the key is the name of the sequence as defined by the FASTA header and the value is a list of lists where the first element is the original sequence as in the .fasta file and the second element is a list of lists where each sublist contains the exact sequence used for the prediction and the value is the TADA score.
-
-
-### Examples
-
-Predicting TAD scores for sequences in a .fasta file:
-```python
-fasta_file = "example.fasta"
-fasta_predictions = predict_from_fasta(fasta_file)
-print(fasta_predictions)
-{'0': ['QFNENSNIMQQQPLQGSFNPSSQESFLWEESFLLFDFSDT', [['QFNENSNIMQQQPLQGSFNPSSQESFLWEESFLLFDFSDT', 0.6412013]]], '1': ['EFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTDEF', [['EFSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTD', 0.6459648], ['FSPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTDE', 0.6526802], ['SPENSSSSSWSSQESFLWEESFLHQSFDQSFLLSSPTDEF', 0.6716454]]]}
-```
-
-In the above example, the sequence associated with the .fasta header >1 is longer than 40 amino acids. Thus, we have multiple subsequences of length 40 amino acids that were used for each prediction.
-  
-**NOTE**: If there are any sequences under 40 amino acids in your fasta file, you must set ``safe_mode=False`` or it will not run any predictions.
-
-**NOTE**: as with the ``predict`` function, you can also modify the ``pad`` and ``approach`` parameters for dealing with sequences under 40 amino acids. 
-
-**Note**: as with the ``predict`` function, you can also modify the ``overlap_length`` for dealing with sequences greater than 40 amino acids. 
-
-**Example showing altered pad, approach, overlap length**
-```python
-fasta_file = "example.fasta"
-fasta_predictions = predict_from_fasta(fasta_file, safe_mode=False, pad='random', approach='N', overlap_length=20)
-```
-
-# Version history
-
-## v0.14.0 (October 14, 2024)
-* Fixed problems with downloading TADA_T2 from PyPi.
-* Updated README.md to clarify what TAD scores mean.
-* Skipped multiple version numbers because I'm really good at this.
-
-## v0.11.0 (October 4, 2024)
-* Fixed import errors.
-
-## v0.1.0 (October 4, 2024)
-* Initial release of TADA_T2
-
-
-# other TADA_T2 info...
-
-## TADA_T2 dependencies
-Dependencies are:
-* alphaPredict
-* Tensorflow
-* localcider
-* numpy
-* protfasta
-
-
-### Copyright
-
-Copyright (c) 2024, Ryan Emenecker Holehouse Lab WUSM
-
-
-#### Acknowledgements
- 
-Project based on the 
-[Computational Molecular Science Python Cookiecutter](https://github.com/molssi/cookiecutter-cms) version 1.10.
+- [TADA_T2](https://github.com/ryanemenecker/TADA_T2) — 原始仓库，Ryan Emenecker, Holehouse Lab WUSM
+- [alphaPredict](https://github.com/holehouse-lab/alphaPredict) — 二级结构预测
+- [localCider](https://github.com/Pappulab/localCider) — 理化性质计算
+## 联系方式
+xiaouyuxiaofen@petalmail.com
