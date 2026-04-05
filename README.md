@@ -92,11 +92,13 @@ TADA_T2 是一个用于预测**转录激活域 (Transcriptional Activation Domai
 ### 一键安装
 
 ```bash
-# 1. 解压安装包
-unzip TADA_T2_GPU.zip
+# 1. 下载安装包
+本分支下的TADA_V2_GPU目录
+
+# 2. 定向到目录
 cd TADA_T2_GPU
 
-# 2. 运行安装脚本
+# 3. 运行安装脚本
 chmod +x setup.sh
 ./setup.sh
 ```
